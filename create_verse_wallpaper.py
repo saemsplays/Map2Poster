@@ -326,10 +326,11 @@ def shift_map_center(lat, lon, verse_y_center, dist_m):
 def create_verse_clearing_mask(W_px, H_px, clear_config, verse_position, theme):
     """
     Creates an RGBA mask for the verse clearing area with Gaussian blur.
+    Now supports restricted width proportional to text coverage.
     
     Args:
         W_px, H_px: Canvas dimensions
-        clear_config: Clearing size configuration
+        clear_config: Clearing size configuration (includes verse_width_fraction)
         verse_position: Position dict with x_center and y_center
         theme: Theme dictionary
         
@@ -348,6 +349,7 @@ def create_verse_clearing_mask(W_px, H_px, clear_config, verse_position, theme):
     
     # Main clearing parameters
     verse_height_frac = clear_config['verse_height_fraction']
+    verse_width_frac = clear_config.get('verse_width_fraction', 0.8)
     title_height_frac = clear_config.get('title_height_fraction', 0.08)
     
     y_center = verse_position['y_center']
@@ -356,13 +358,42 @@ def create_verse_clearing_mask(W_px, H_px, clear_config, verse_position, theme):
     h_main = verse_height_frac / 2
     sigma_main = FEATHER_SIGMA_FRACTION * verse_height_frac
     
-    # Create main clearing mask (vertical Gaussian)
+    # Horizontal buffer for clearing (fraction of width)
+    x_buffer = 0.12 # Coverage buffer
+    
+    # Horizontal extents for main clearing based on alignment
+    if x_center > 0.9: # Right aligned
+        main_x_left = 1.0 - (verse_width_frac + x_buffer)
+        main_x_right = 1.0
+    elif x_center < 0.1: # Left aligned
+        main_x_left = 0.0
+        main_x_right = verse_width_frac + x_buffer
+    else: # Center aligned
+        main_x_left = x_center - (verse_width_frac + x_buffer) / 2
+        main_x_right = x_center + (verse_width_frac + x_buffer) / 2
+    
+    # FEATHER_SIGMA_FRACTION for horizontal should be similar to vertical or slightly smaller
+    sigma_x = FEATHER_SIGMA_FRACTION * 0.15 
+
+    # Create main clearing mask (2D Gaussian-ish)
     main_alpha = np.zeros((H_px, W_px), dtype=np.float32)
     
     for i, y in enumerate(y_coords):
-        d = (y - y_center) / h_main if h_main > 0 else 0
-        alpha_val = MAX_ALPHA * np.exp(-0.5 * (d / sigma_main) ** 2) if sigma_main > 0 else 0
-        main_alpha[i, :] = np.clip(alpha_val, 0, MAX_ALPHA)
+        d_y = (y - y_center) / h_main if h_main > 0 else 0
+        alpha_y = np.exp(-0.5 * (d_y / sigma_main) ** 2) if sigma_main > 0 else 0
+        
+        for j, x in enumerate(x_coords):
+            # Horizontal falloff for main clearing
+            if x < main_x_left:
+                d_x = (main_x_left - x) / sigma_x
+                alpha_x = np.exp(-0.5 * d_x ** 2)
+            elif x > main_x_right:
+                d_x = (x - main_x_right) / sigma_x
+                alpha_x = np.exp(-0.5 * d_x ** 2)
+            else:
+                alpha_x = 1.0
+            
+            main_alpha[i, j] = MAX_ALPHA * alpha_y * alpha_x
     
     # Create title clearing mask (dynamic offset)
     title_alpha = np.zeros((H_px, W_px), dtype=np.float32)
@@ -374,9 +405,7 @@ def create_verse_clearing_mask(W_px, H_px, clear_config, verse_position, theme):
     
     # Align title clearing with text alignment
     title_width = TITLE_WIDTH_FRACTION
-    title_x_center = x_center
     
-    # Desktop positioning usually has text aligned to edges
     if x_center > 0.9: # Right aligned
         title_x_left = 1.0 - title_width
         title_x_right = 1.0
@@ -731,13 +760,35 @@ def create_verse_wallpaper(
         print("Creating verse clearing...")
         # Deep modify clear_config to reflect refined layout for mask
         dynamic_clear_config = clear_config.copy()
+        
+        # Estimate horizontal coverage
+        lines = wrapped_verse.split('\n')
+        if lines:
+            max_line_len = max(len(l) for l in lines)
+            # Chars_per_line spans ~80% of width. 
+            # We add a bit extra for the font character variations.
+            verse_width_frac = (max_line_len / chars_per_line) * 0.85
+        else:
+            verse_width_frac = 0.5 # Default fallback
+            
+        dynamic_clear_config['verse_width_fraction'] = verse_width_frac
+        
         if n_lines > 0:
-            # Main clearing height is the verse block height + some buffer for feathering
-            dynamic_clear_config['verse_height_fraction'] = verse_total_height_axes + 0.05
+            # Main clearing height is the verse block height + buffer for feathering
+            # Increased buffer to 0.12 total (+0.06 each side) to prevent "squeezed" look
+            dynamic_clear_config['verse_height_fraction'] = verse_total_height_axes + 0.12
             # Title clearing is much closer
             dynamic_clear_config['title_y_offset'] = (verse_total_height_axes / 2) + title_gap_axes
         
-        mask_rgba = create_verse_clearing_mask(W_px, H_px, dynamic_clear_config, verse_position, theme)
+        # Update verse_position x_center for the mask if desktop aligned
+        mask_verse_pos = verse_position.copy()
+        if is_landscape:
+            if verse_position_name == 'right':
+                mask_verse_pos['x_center'] = 1.0 # Anchor to right edge
+            elif verse_position_name == 'left':
+                mask_verse_pos['x_center'] = 0.0 # Anchor to left edge
+        
+        mask_rgba = create_verse_clearing_mask(W_px, H_px, dynamic_clear_config, mask_verse_pos, theme)
         if mask_rgba is not None:
             xlim = ax.get_xlim()
             ylim = ax.get_ylim()
