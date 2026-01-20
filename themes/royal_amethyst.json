@@ -1,0 +1,15 @@
+{
+    "name": "Royal Amethyst",
+    "description": "Deep imperial purple with radiant gold accents - luxurious regal aesthetic",
+    "bg": "#1A0D2B",
+    "text": "#F1C40F",
+    "gradient_color": "#1A0D2B",
+    "water": "#0F081A",
+    "parks": "#2E1A47",
+    "road_motorway": "#F1C40F",
+    "road_primary": "#D4AC0D",
+    "road_secondary": "#B7950B",
+    "road_tertiary": "#9A7D0A",
+    "road_residential": "#7D6608",
+    "road_default": "#9A7D0A"
+}

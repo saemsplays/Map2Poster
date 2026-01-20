@@ -1,0 +1,15 @@
+{
+    "name": "Matcha Garden",
+    "description": "Sage greens and white tea tones - serene Japanese garden aesthetic",
+    "bg": "#F5F7F2",
+    "text": "#3A4D39",
+    "gradient_color": "#F5F7F2",
+    "water": "#A8C3A0",
+    "parks": "#C2D9BC",
+    "road_motorway": "#4F6F52",
+    "road_primary": "#739072",
+    "road_secondary": "#86A789",
+    "road_tertiary": "#A9B388",
+    "road_residential": "#C9D4B5",
+    "road_default": "#A9B388"
+}

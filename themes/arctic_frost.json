@@ -1,0 +1,15 @@
+{
+    "name": "Arctic Frost",
+    "description": "Icy pale blues and crisp slate - clean Nordic glacial aesthetic",
+    "bg": "#E6F3F7",
+    "text": "#2C3E50",
+    "gradient_color": "#E6F3F7",
+    "water": "#A9D0E5",
+    "parks": "#D1E5E9",
+    "road_motorway": "#3498DB",
+    "road_primary": "#5DADE2",
+    "road_secondary": "#85C1E9",
+    "road_tertiary": "#AED6F1",
+    "road_residential": "#D6EAF8",
+    "road_default": "#AED6F1"
+}
