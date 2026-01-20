@@ -51,6 +51,10 @@ PRESETS = {
     'desktop': (1920, 1080),
     'desktop_hd': (2560, 1440),
     'stories': (1080, 1920),
+    # High-DPI / High-Quality Presets
+    'mobile_max': (1800, 2400),
+    'desktop_max': (2400, 3200),
+    'ultra_hd': (3600, 4800),
 }
 
 # Clearing size parameters (fraction of canvas height)
@@ -991,7 +995,8 @@ Options:
   --city, -c          City name (required)
   --country, -C       Country name (required)
   --theme, -t         Theme name (default: noir)
-  --preset, -p        Resolution preset: mobile, mobile_hd, desktop, desktop_hd, stories
+  --preset, -p        Resolution: mobile, mobile_hd, desktop, desktop_hd, stories,
+                      mobile_max, desktop_max, ultra_hd
   --distance, -d      Map radius in meters (default: 15000)
   --verse             Verse text to display
   --title             Verse reference/title
@@ -1001,11 +1006,14 @@ Options:
   --list-themes       List all available themes
 
 Presets:
-  mobile     1080x1920 (standard mobile)
-  mobile_hd  1440x2560 (high-DPI mobile)
-  desktop    1920x1080 (standard desktop)
-  desktop_hd 2560x1440 (high-DPI desktop)
-  stories    1080x1920 (Instagram stories)
+  mobile      1080x1920 (standard mobile)
+  mobile_hd   1440x2560 (high-DPI mobile)
+  desktop     1920x1080 (standard desktop)
+  desktop_hd  2560x1440 (high-DPI desktop)
+  stories     1080x1920 (Instagram stories)
+  mobile_max  1800x2400 (Max mobile quality)
+  desktop_max 2400x3200 (Max desktop quality)
+  ultra_hd    3600x4800 (Absolute maximum quality)
 """)
 
 
