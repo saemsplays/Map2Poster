@@ -29,6 +29,9 @@ import argparse
 from PIL import Image
 import io
 import textwrap
+import requests
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
 # No external SVG libraries needed - using PNG logos with PIL color tinting
 
@@ -90,6 +93,23 @@ VERSE_POSITIONS = {
     'below': {'x_center': 0.5, 'y_center': 0.40},
 }
 
+# Network hardening for Overpass API
+ox.settings.requests_timeout = 300
+ox.settings.timeout = 300
+ox.settings.overpass_rate_limit = False  # kumi.systems handles its own rate limiting
+ox.settings.overpass_endpoint = 'https://overpass.kumi.systems/api/interpreter'
+ox.settings.overpass_url = 'https://overpass.kumi.systems/api/interpreter'
+ox.settings.log_console = True  # Enable logging to see what's happening
+
+# Configure persistent session with retries for requests
+session = requests.Session()
+retries = Retry(
+    total=5,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+)
+session.mount('https://', HTTPAdapter(max_retries=retries))
+ox.settings.requests_kwargs = {'verify': True}
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -210,9 +230,9 @@ def get_logo_png_path(theme):
         return os.path.join(ASSETS_DIR, 'NOD-LOGO-light.png')
 
 
-def render_logo_with_color(theme, size):
+def render_logo_with_color(theme, target_height):
     """
-    Render logo at specified size with theme's text color.
+    Render logo with theme's text color, maintaining aspect ratio.
     Uses PNG base with PIL color tinting.
     Returns PIL Image with transparency.
     """
@@ -227,8 +247,13 @@ def render_logo_with_color(theme, size):
         # Load the base logo
         logo = Image.open(logo_path).convert('RGBA')
         
+        # Calculate width to maintain aspect ratio
+        w, h = logo.size
+        aspect = w / h
+        target_width = int(target_height * aspect)
+        
         # Resize to target size
-        logo = logo.resize(size, Image.LANCZOS)
+        logo = logo.resize((target_width, target_height), Image.LANCZOS)
         
         # Get the alpha channel
         r, g, b, a = logo.split()
@@ -257,17 +282,29 @@ def generate_output_filename(city, theme_name, preset, output_format):
 
 
 def get_coordinates(city, country):
-    """Fetches coordinates for a given city and country using geopy."""
+    """Fetches coordinates for a given city and country using geopy with retries."""
     print("Looking up coordinates...")
     geolocator = Nominatim(user_agent="verse_wallpaper_generator")
-    time.sleep(1)
-    location = geolocator.geocode(f"{city}, {country}")
-    if location:
-        print(f"✓ Found: {location.address}")
-        print(f"✓ Coordinates: {location.latitude}, {location.longitude}")
-        return (location.latitude, location.longitude)
-    else:
-        raise ValueError(f"Could not find coordinates for {city}, {country}")
+    
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            # Respect Nominatim's usage policy with a sleep
+            time.sleep(1.5)
+            location = geolocator.geocode(f"{city}, {country}")
+            if location:
+                print(f"✓ Found: {location.address}")
+                print(f"✓ Coordinates: {location.latitude}, {location.longitude}")
+                return (location.latitude, location.longitude)
+            else:
+                raise ValueError(f"Could not find coordinates for {city}, {country}")
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                wait_time = (attempt + 1) * 3
+                print(f"  ⚠ Geocoding attempt {attempt+1} failed ({e}). Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise e
 
 
 def shift_map_center(lat, lon, verse_y_center, dist_m):
@@ -288,14 +325,14 @@ def shift_map_center(lat, lon, verse_y_center, dist_m):
 
 def create_verse_clearing_mask(W_px, H_px, clear_config, verse_position, theme):
     """
-    Generate RGBA clearing mask with main and title clearings.
+    Creates an RGBA mask for the verse clearing area with Gaussian blur.
     
     Args:
-        W_px, H_px: Canvas dimensions in pixels
-        clear_config: Dict with verse_height_fraction, title_height_fraction, enabled
-        verse_position: Dict with x_center, y_center
-        theme: Theme dict for clearing color
-    
+        W_px, H_px: Canvas dimensions
+        clear_config: Clearing size configuration
+        verse_position: Position dict with x_center and y_center
+        theme: Theme dictionary
+        
     Returns:
         RGBA numpy array with clearing mask
     """
@@ -311,7 +348,7 @@ def create_verse_clearing_mask(W_px, H_px, clear_config, verse_position, theme):
     
     # Main clearing parameters
     verse_height_frac = clear_config['verse_height_fraction']
-    title_height_frac = clear_config['title_height_fraction']
+    title_height_frac = clear_config.get('title_height_fraction', 0.08)
     
     y_center = verse_position['y_center']
     x_center = verse_position['x_center']
@@ -327,15 +364,28 @@ def create_verse_clearing_mask(W_px, H_px, clear_config, verse_position, theme):
         alpha_val = MAX_ALPHA * np.exp(-0.5 * (d / sigma_main) ** 2) if sigma_main > 0 else 0
         main_alpha[i, :] = np.clip(alpha_val, 0, MAX_ALPHA)
     
-    # Create title clearing mask (smaller, centered above main)
+    # Create title clearing mask (dynamic offset)
     title_alpha = np.zeros((H_px, W_px), dtype=np.float32)
     
-    title_y_center = y_center + h_main + TITLE_GAP_FRACTION + title_height_frac / 2
+    title_y_offset = clear_config.get('title_y_offset', h_main + TITLE_GAP_FRACTION + title_height_frac / 2)
+    title_y_center = y_center + title_y_offset
     h_title = title_height_frac / 2
     sigma_title = FEATHER_SIGMA_FRACTION * title_height_frac
     
-    title_x_left = x_center - TITLE_WIDTH_FRACTION / 2
-    title_x_right = x_center + TITLE_WIDTH_FRACTION / 2
+    # Align title clearing with text alignment
+    title_width = TITLE_WIDTH_FRACTION
+    title_x_center = x_center
+    
+    # Desktop positioning usually has text aligned to edges
+    if x_center > 0.9: # Right aligned
+        title_x_left = 1.0 - title_width
+        title_x_right = 1.0
+    elif x_center < 0.1: # Left aligned
+        title_x_left = 0.0
+        title_x_right = title_width
+    else: # Center aligned
+        title_x_left = x_center - title_width / 2
+        title_x_right = x_center + title_width / 2
     
     for i, y in enumerate(y_coords):
         d_y = (y - title_y_center) / h_title if h_title > 0 else 0
@@ -535,25 +585,56 @@ def create_verse_wallpaper(
     fig_width = W_px / dpi
     fig_height = H_px / dpi
     
-    # Fetch map data
+    # Fetch map data with hardening
     with tqdm(total=3, desc="Fetching map data", unit="step") as pbar:
+        # Step 1: Download street network
         pbar.set_description("Downloading street network")
-        G = ox.graph_from_point(shifted_point, dist=dist, dist_type='bbox', network_type='all')
-        pbar.update(1)
-        time.sleep(0.5)
         
+        # Determine density-based fetching strategy
+        # For very large distances or known dense areas, we might need drive network
+        fetch_network_type = 'all'
+        if dist > 10000 and city.lower() in ['nairobi', 'tokyo', 'mumbai', 'delhi']:
+            print(f"\n  ! Dense area detected: Using 'drive' network type for stability.")
+            fetch_network_type = 'drive'
+        
+        # Final retry loop for the graph fetching
+        max_attempts = 3
+        G = None
+        for attempt in range(max_attempts):
+            try:
+                G = ox.graph_from_point(
+                    shifted_point, 
+                    dist=dist, 
+                    dist_type='bbox', 
+                    network_type=fetch_network_type,
+                    simplify=True
+                )
+                if G: break
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    wait_time = (attempt + 1) * 5
+                    print(f"\n  ⚠ API attempt {attempt+1} failed. Retrying in {wait_time}s... ({e})")
+                    time.sleep(wait_time)
+                else:
+                    raise Exception(f"Failed to download map data after {max_attempts} attempts: {e}")
+        
+        pbar.update(1)
+        
+        # Step 2: Download water features
         pbar.set_description("Downloading water features")
         try:
             water = ox.features_from_point(shifted_point, tags={'natural': 'water', 'waterway': 'riverbank'}, dist=dist)
-        except:
+        except Exception as e:
+            print(f"\n  ⚠ Water download failed (skipped): {e}")
             water = None
         pbar.update(1)
-        time.sleep(0.3)
         
+        # Step 3: Download parks/green spaces
         pbar.set_description("Downloading parks/green spaces")
         try:
             parks = ox.features_from_point(shifted_point, tags={'leisure': 'park', 'landuse': 'grass'}, dist=dist)
-        except:
+        except Exception as e:
+            print(f"\n  ⚠ Parks download failed (skipped): {e}")
             parks = None
         pbar.update(1)
     
@@ -600,12 +681,8 @@ def create_verse_wallpaper(
             ax.imshow(mask_rgba, extent=[xlim[0], xlim[1], ylim[0], ylim[1]],
                       aspect='auto', zorder=8, origin='lower')
     
-    # Top and bottom gradients
-    create_gradient_fade(ax, theme['gradient_color'], location='bottom', zorder=9, height_fraction=0.20)
-    create_gradient_fade(ax, theme['gradient_color'], location='top', zorder=9, height_fraction=0.18)
-    
     # ==========================================================================
-    # TYPOGRAPHY AND BRANDING
+    # TYPOGRAPHY AND BRANDING SETUP
     # ==========================================================================
     
     # Font setup with scaling
@@ -628,34 +705,83 @@ def create_verse_wallpaper(
     
     text_color = theme['text']
     
+    # Calculate text layout for tightening
+    chars_per_line = int(40 * (W_px / 1080))
+    wrapped_verse = textwrap.fill(verse_text, width=chars_per_line)
+    n_lines = len(wrapped_verse.split('\n')) if verse_text else 0
+    
+    verse_line_height_pixels = max(20 * font_scale, 14) * 1.4
+    verse_line_height_axes = verse_line_height_pixels / H_px
+    verse_total_height_axes = n_lines * verse_line_height_axes
+    
+    # USER: "distance = one space height equal to a single line sentence"
+    title_gap_axes = verse_line_height_axes
+    
+    if verse_title and n_lines > 0:
+        # Verse text is centered at y_center
+        # Title y = top of verse block + gap
+        title_y = verse_position['y_center'] + (verse_total_height_axes / 2) + title_gap_axes
+    elif verse_title:
+        title_y = verse_position['y_center']
+    else:
+        title_y = verse_position['y_center']
+
+    # Update clearing mask with exact layout
+    if clear_config['enabled']:
+        print("Creating verse clearing...")
+        # Deep modify clear_config to reflect refined layout for mask
+        dynamic_clear_config = clear_config.copy()
+        if n_lines > 0:
+            # Main clearing height is the verse block height + some buffer for feathering
+            dynamic_clear_config['verse_height_fraction'] = verse_total_height_axes + 0.05
+            # Title clearing is much closer
+            dynamic_clear_config['title_y_offset'] = (verse_total_height_axes / 2) + title_gap_axes
+        
+        mask_rgba = create_verse_clearing_mask(W_px, H_px, dynamic_clear_config, verse_position, theme)
+        if mask_rgba is not None:
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            ax.imshow(mask_rgba, extent=[xlim[0], xlim[1], ylim[0], ylim[1]],
+                      aspect='auto', zorder=8, origin='lower')
+    
+    # Top and bottom gradients
+    create_gradient_fade(ax, theme['gradient_color'], location='bottom', zorder=9, height_fraction=0.15)
+    create_gradient_fade(ax, theme['gradient_color'], location='top', zorder=9, height_fraction=0.15)
+    
+    # Determine alignment for desktop
+    ha = 'center'
+    text_x = verse_position['x_center']
+    if is_landscape:
+        if verse_position_name == 'right':
+            ha = 'right'
+            text_x = 0.96 # Align with branding edge
+        elif verse_position_name == 'left':
+            ha = 'left'
+            text_x = 0.04
+    
     # --- VERSE TITLE (reference) ---
     if verse_title and clear_config['enabled']:
-        title_y = verse_position['y_center'] + clear_config['verse_height_fraction'] / 2 + TITLE_GAP_FRACTION + clear_config['title_height_fraction'] / 2
         ax.text(
-            verse_position['x_center'], title_y,
+            text_x, title_y,
             verse_title.upper(),
             transform=ax.transAxes,
-            color=text_color, ha='center', va='center',
+            color=text_color, ha=ha, va='center',
             fontproperties=font_title, zorder=12
         )
     
     # --- VERSE TEXT ---
     if verse_text and clear_config['enabled']:
-        # Wrap text based on canvas width
-        chars_per_line = int(40 * (W_px / 1080))
-        wrapped_verse = textwrap.fill(verse_text, width=chars_per_line)
-        
         ax.text(
-            verse_position['x_center'], verse_position['y_center'],
+            text_x, verse_position['y_center'],
             wrapped_verse,
             transform=ax.transAxes,
-            color=text_color, ha='center', va='center',
+            color=text_color, ha=ha, va='center',
             fontproperties=font_verse, zorder=12,
             linespacing=1.4
         )
     
     # --- BOTTOM LEFT: City info ---
-    bottom_y_start = 0.22  # Above the bottom gradient
+    bottom_y_start = 0.05  # Further down as requested
     line_spacing = 0.025
     
     # City name (spaced letters)
@@ -670,11 +796,11 @@ def create_verse_wallpaper(
     else:
         font_city_adjusted = FontProperties(family='sans-serif', weight='bold', size=city_font_size)
     
-    ax.text(0.04, bottom_y_start, spaced_city,
+    ax.text(0.04, bottom_y_start + line_spacing * 2, spaced_city,
             transform=ax.transAxes, color=text_color, ha='left',
             fontproperties=font_city_adjusted, zorder=12)
     
-    ax.text(0.04, bottom_y_start - line_spacing, country.upper(),
+    ax.text(0.04, bottom_y_start + line_spacing, country.upper(),
             transform=ax.transAxes, color=text_color, ha='left',
             fontproperties=font_country, zorder=12)
     
@@ -684,21 +810,21 @@ def create_verse_wallpaper(
     lon_dir = 'E' if lon >= 0 else 'W'
     coords_str = f"{abs(lat):.4f}° {lat_dir} / {abs(lon):.4f}° {lon_dir}"
     
-    ax.text(0.04, bottom_y_start - line_spacing * 2, coords_str,
+    ax.text(0.04, bottom_y_start, coords_str,
             transform=ax.transAxes, color=text_color, alpha=0.7, ha='left',
             fontproperties=font_coords, zorder=12)
     
     # --- BOTTOM RIGHT: NOD Logo and tagline ---
-    # Logo size (proportional to canvas)
-    logo_height_px = int(H_px * 0.035)  # 3.5% of height
-    logo_width_px = int(logo_height_px * 2.5)  # Approximate aspect ratio
+    # Logo height (proportional to canvas)
+    logo_height_px = int(H_px * 0.045)  # Slightly larger logo
     
-    logo_img = render_logo_with_color(theme, (logo_width_px, logo_height_px))
+    logo_img = render_logo_with_color(theme, logo_height_px)
     
     if logo_img is not None:
+        logo_width_px, _ = logo_img.size
         # Position logo in bottom right
         logo_x_frac = 0.96 - (logo_width_px / W_px)
-        logo_y_frac = bottom_y_start - line_spacing
+        logo_y_frac = bottom_y_start + line_spacing - 0.005 # Center horizontally with country name
         
         xlim = ax.get_xlim()
         ylim = ax.get_ylim()
@@ -714,8 +840,8 @@ def create_verse_wallpaper(
         
         ax.imshow(logo_img, extent=logo_extent, aspect='auto', zorder=12)
     
-    # Tagline below logo
-    tagline_y = bottom_y_start - line_spacing * 2 - 0.005
+    # Tagline below logo, aligned with coordinates
+    tagline_y = bottom_y_start
     ax.text(0.96, tagline_y, "Number Our Days",
             transform=ax.transAxes, color=text_color, alpha=0.8, ha='right',
             fontproperties=font_tagline, zorder=12, style='italic')
@@ -794,20 +920,20 @@ Usage:
 
 Examples:
   # Simple mobile wallpaper with verse
-  python create_verse_wallpaper.py -c "Nairobi" -C "Kenya" -t noir --preset mobile \\
+  python create_verse_wallpaper.py -c "Nairobi" -C "Kenya" -t noir --preset mobile `
       --verse "Teach us to number our days." --title "Psalm 90:12"
   
   # Desktop wallpaper with verse on right side
-  python create_verse_wallpaper.py -c "Paris" -C "France" -t midnight_blue --preset desktop \\
-      --verse "Be still and know that I am God." --title "Psalm 46:10" \\
+  python create_verse_wallpaper.py -c "Paris" -C "France" -t midnight_blue --preset desktop `
+      --verse "Be still and know that I am God." --title "Psalm 46:10" `
       --verse-position right
   
   # Plain map without clearing
-  python create_verse_wallpaper.py -c "Tokyo" -C "Japan" -t japanese_ink --preset mobile_hd \\
+  python create_verse_wallpaper.py -c "Tokyo" -C "Japan" -t japanese_ink --preset mobile_hd `
       --clear-size none
   
   # Long verse with large clearing
-  python create_verse_wallpaper.py -c "London" -C "UK" -t ocean --preset mobile \\
+  python create_verse_wallpaper.py -c "London" -C "UK" -t ocean --preset mobile `
       --verse "Trust in the LORD with all your heart..." --title "Proverbs 3:5-6"
 
 Options:
