@@ -553,7 +553,7 @@ def create_verse_wallpaper(
     verse_text="", verse_title="",
     theme_name="noir", preset="mobile",
     output_format="png", verse_position_name="center",
-    clear_size=None
+    clear_size=None, watermark=True, quality=90, dpi=100
 ):
     """
     Generate a verse wallpaper with map background.
@@ -613,8 +613,7 @@ def create_verse_wallpaper(
     print(f"  Preset: {preset} ({W_px}x{H_px})")
     print(f"  Theme: {theme.get('name', theme_name)}")
     
-    # Compute figure size for matplotlib (at 100 DPI base)
-    dpi = 100
+    # Compute figure size for matplotlib (at requested DPI)
     fig_width = W_px / dpi
     fig_height = H_px / dpi
     
@@ -870,36 +869,39 @@ def create_verse_wallpaper(
             fontproperties=font_coords, zorder=12)
     
     # --- BOTTOM RIGHT: NOD Logo and tagline ---
-    # Logo height (proportional to canvas)
-    logo_height_px = int(H_px * 0.045)  # Slightly larger logo
-    
-    logo_img = render_logo_with_color(theme, logo_height_px)
-    
-    if logo_img is not None:
-        logo_width_px, _ = logo_img.size
-        # Position logo in bottom right
-        logo_x_frac = 0.96 - (logo_width_px / W_px)
-        logo_y_frac = bottom_y_start + line_spacing - 0.005 # Center horizontally with country name
+    if watermark:
+        # Logo height (proportional to canvas)
+        logo_height_px = int(H_px * 0.045)  # Slightly larger logo
         
-        xlim = ax.get_xlim()
-        ylim = ax.get_ylim()
-        x_range = xlim[1] - xlim[0]
-        y_range = ylim[1] - ylim[0]
+        logo_img = render_logo_with_color(theme, logo_height_px)
         
-        logo_extent = [
-            xlim[0] + x_range * logo_x_frac,
-            xlim[0] + x_range * logo_x_frac + x_range * (logo_width_px / W_px),
-            ylim[0] + y_range * logo_y_frac,
-            ylim[0] + y_range * logo_y_frac + y_range * (logo_height_px / H_px)
-        ]
+        if logo_img is not None:
+            logo_width_px, _ = logo_img.size
+            # Position logo in bottom right
+            logo_x_frac = 0.96 - (logo_width_px / W_px)
+            logo_y_frac = bottom_y_start + line_spacing - 0.005 # Center horizontally with country name
+            
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            x_range = xlim[1] - xlim[0]
+            y_range = ylim[1] - ylim[0]
+            
+            logo_extent = [
+                xlim[0] + x_range * logo_x_frac,
+                xlim[0] + x_range * logo_x_frac + x_range * (logo_width_px / W_px),
+                ylim[0] + y_range * logo_y_frac,
+                ylim[0] + y_range * logo_y_frac + y_range * (logo_height_px / H_px)
+            ]
+            
+            ax.imshow(logo_img, extent=logo_extent, aspect='auto', zorder=12)
         
-        ax.imshow(logo_img, extent=logo_extent, aspect='auto', zorder=12)
-    
-    # Tagline below logo, aligned with coordinates
-    tagline_y = bottom_y_start
-    ax.text(0.96, tagline_y, "Number Our Days",
-            transform=ax.transAxes, color=text_color, alpha=0.8, ha='right',
-            fontproperties=font_tagline, zorder=12, style='italic')
+        # Tagline below logo, aligned with coordinates
+        tagline_y = bottom_y_start
+        ax.text(0.96, tagline_y, "Number Our Days",
+                transform=ax.transAxes, color=text_color, alpha=0.8, ha='right',
+                fontproperties=font_tagline, zorder=12, style='italic')
+    else:
+        print("✓ High-Res Max: Watermark omitted as requested.")
     
     # --- ATTRIBUTION (hidden - same color as background) ---
     if FONTS:
@@ -943,18 +945,18 @@ def create_verse_wallpaper(
     # Save in requested format
     fmt = output_format.lower()
     if fmt == 'png':
-        img.save(output_file, 'PNG', optimize=True)
+        img.save(output_file, 'PNG', optimize=True, dpi=(dpi, dpi))
     elif fmt == 'webp':
-        img.save(output_file, 'WEBP', quality=90, method=6)
+        img.save(output_file, 'WEBP', quality=quality, method=6)
     elif fmt == 'avif':
         try:
-            img.save(output_file, 'AVIF', quality=80)
+            img.save(output_file, 'AVIF', quality=quality)
         except Exception as e:
             print(f"⚠ AVIF not supported: {e}. Saving as PNG.")
             output_file = output_file.replace('.avif', '.png')
-            img.save(output_file, 'PNG', optimize=True)
+            img.save(output_file, 'PNG', optimize=True, dpi=(dpi, dpi))
     else:
-        img.save(output_file, 'PNG', optimize=True)
+        img.save(output_file, 'PNG', optimize=True, dpi=(dpi, dpi))
     
     print(f"✓ Done! Wallpaper saved as {output_file}")
     return output_file

@@ -102,9 +102,14 @@ async def generate_verse_wallpaper(
     preset: str = "mobile",
     output_format: str = "png",
     verse_position: str = "center",
-    clear_size: Optional[str] = None
+    clear_size: Optional[str] = None,
+    watermark: bool = True,
+    quality: int = 90,
+    dpi: int = 100
 ):
     logger.info(f"Generating verse wallpaper for {city}, {country} with theme {theme_name}")
+    logger.info(f"Params: preset={preset}, format={output_format}, watermark={watermark}, quality={quality}, dpi={dpi}")
+    
     # Get coordinates
     coords = create_verse_wallpaper.get_coordinates(city, country)
     
@@ -124,11 +129,17 @@ async def generate_verse_wallpaper(
         preset=preset,
         output_format=output_format,
         verse_position_name=verse_position,
-        clear_size=clear_size
+        clear_size=clear_size,
+        watermark=watermark,
+        quality=quality,
+        dpi=dpi
     )
     
     if output_path and os.path.exists(output_path):
-        return FileResponse(output_path, media_type=f"image/{output_format}")
+        media_type = f"image/{output_format}"
+        if output_format == "avif":
+            media_type = "image/avif"
+        return FileResponse(output_path, media_type=media_type)
     else:
         raise HTTPException(status_code=500, detail="Generated wallpaper not found on disk")
 
