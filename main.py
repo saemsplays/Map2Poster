@@ -105,17 +105,20 @@ async def generate_verse_wallpaper(
     clear_size: Optional[str] = None,
     watermark: bool = True,
     quality: int = 90,
-    dpi: int = 100
+    dpi: int = 100,
+    distance: Optional[int] = None
 ):
     logger.info(f"Generating verse wallpaper for {city}, {country} with theme {theme_name}")
-    logger.info(f"Params: preset={preset}, format={output_format}, watermark={watermark}, quality={quality}, dpi={dpi}")
+    logger.info(f"Params: preset={preset}, format={output_format}, watermark={watermark}, quality={quality}, dpi={dpi}, distance={distance}")
     
     # Get coordinates
     coords = create_verse_wallpaper.get_coordinates(city, country)
     
-    # Get distance from theme if possible, else default
-    temp_theme = create_map_poster.load_theme(theme_name)
-    dist = temp_theme.get('distance', 10000)
+    # Get distance from theme if possible, override if distance provided
+    dist = distance
+    if dist is None:
+        temp_theme = create_map_poster.load_theme(theme_name)
+        dist = temp_theme.get('distance', 10000)
     
     # Generate wallpaper
     output_path = create_verse_wallpaper.create_verse_wallpaper(
