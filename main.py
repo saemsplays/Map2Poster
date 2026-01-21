@@ -1,4 +1,7 @@
 import os
+# Force matplotlib to use a non-interactive backend
+os.environ["MPLBACKEND"] = "Agg"
+
 import io
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
