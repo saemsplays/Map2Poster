@@ -1,152 +1,122 @@
-import os
-# Force matplotlib to use a non-interactive backend
-os.environ["MPLBACKEND"] = "Agg"
-
-import io
-import logging
-import traceback
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
-from typing import Optional, List
-import create_map_poster
-import create_verse_wallpaper
-from datetime import datetime
+import subprocess
+import os
+import requests
+import sys
+import re
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+app = FastAPI(title="CybUrban Rendering Engine (CLI Wrapper)")
 
-app = FastAPI(title="Map2Poster API", description="API for generating map posters and verse wallpapers")
+# Load environment variables
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# Ensure required directories exist
-for d in ["posters", "themes", "fonts", "cache"]:
-    if not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"Global error: {exc}")
-    logger.error(traceback.format_exc())
-    return JSONResponse(
-        status_code=500,
-        content={"detail": str(exc), "traceback": traceback.format_exc()},
-    )
-
-class PosterRequest(BaseModel):
+class RenderRequest(BaseModel):
+    transactionId: str
     city: str
     country: str
-    theme: str = "feature_based"
-    distance: int = 29000
-    format: str = "png"
+    theme: str
+    preset: str
+    verse: str
+    title: str
+    distance: int
 
-@app.get("/")
-async def root():
-    return {
-        "message": "Welcome to Map2Poster API",
-        "status": "online",
-        "endpoints": {
-            "/health": "Service health check",
-            "/themes": "List available themes",
-            "/generate-poster": "Generate a map poster (GET)",
-            "/generate-verse-wallpaper": "Generate a verse wallpaper (GET)"
-        }
+def run_render_pipeline(req: RenderRequest):
+    """Background task to run the CLI tool and sync to Supabase."""
+    db_url = f"{SUPABASE_URL}/rest/v1/cyburban_transactions?id=eq.{req.transactionId}"
+    db_headers = {
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
     }
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-@app.get("/themes")
-async def list_themes():
     try:
-        themes = create_map_poster.get_available_themes()
-        return {"themes": themes}
+        # 1. Build CLI Arguments
+        # Note: We use the EXACT flags from the original script
+        cmd = [
+            sys.executable, "create_verse_wallpaper.py",
+            "-c", req.city,
+            "-C", req.country,
+            "-t", req.theme,
+            "-p", req.preset,
+            "-d", str(req.distance),
+            "--verse", req.verse,
+            "--title", req.title,
+            "-f", "png" # Force PNG for consistent processing
+        ]
+
+        print(f"Running CLI: {' '.join(cmd)}")
+        
+        # 2. Execute Script
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            raise Exception(f"CLI Error: {result.stderr}")
+
+        # 3. Find the output filename from stdout
+        # Looking for line: "✓ Done! Wallpaper saved as <path>"
+        match = re.search(r"Wallpaper saved as\s+(.*\.png)", result.stdout)
+        if not match:
+            raise Exception("Could not find output filename in script output")
+        
+        local_path = match.group(1).strip()
+        print(f"Detected local file: {local_path}")
+
+        if not os.path.exists(local_path):
+            raise Exception(f"File {local_path} not found on disk")
+
+        # 4. Upload to Supabase Storage
+        filename = f"{req.transactionId}.png"
+        storage_url = f"{SUPABASE_URL}/storage/v1/object/verse_backgrounds/{filename}"
+        
+        with open(local_path, "rb") as f:
+            file_data = f.read()
+
+        storage_headers = {
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+            "Content-Type": "image/png"
+        }
+        
+        # Try POST (new) then PUT (overwrite)
+        resp = requests.post(storage_url, headers=storage_headers, data=file_data)
+        if resp.status_code == 400:
+            resp = requests.put(storage_url, headers=storage_headers, data=file_data)
+
+        if resp.status_code not in [200, 201]:
+            raise Exception(f"Storage upload failed: {resp.text}")
+
+        render_url = f"{SUPABASE_URL}/storage/v1/object/public/verse_backgrounds/{filename}"
+
+        # 5. Finalize DB
+        requests.patch(db_url, headers=db_headers, json={
+            "status": "completed",
+            "full_message": f"Render Delivered: {render_url}"
+        })
+
+        # 6. Cleanup local file
+        if os.path.exists(local_path):
+            os.remove(local_path)
+            print(f"Cleaned up local file: {local_path}")
+
+        print(f"✓ Automation complete for {req.transactionId}")
+
     except Exception as e:
-        logger.error(f"Error listing themes: {e}")
-        raise
+        print(f"✗ Automation failed: {e}")
+        try:
+            requests.patch(db_url, headers=db_headers, json={"status": "failed"})
+        except: pass
 
-@app.get("/generate-poster")
-async def generate_poster(
-    city: str,
-    country: str,
-    theme: str = "feature_based",
-    distance: int = 29000,
-    format: str = "png"
-):
-    logger.info(f"Generating poster for {city}, {country} with theme {theme}")
-    # Load theme
-    create_map_poster.THEME = create_map_poster.load_theme(theme)
-    
-    # Get coordinates
-    coords = create_map_poster.get_coordinates(city, country)
-    
-    # Generate filename
-    output_file = create_map_poster.generate_output_filename(city, theme, format)
-    
-    # Create poster
-    create_map_poster.create_poster(city, country, coords, distance, output_file, format)
-    
-    if os.path.exists(output_file):
-        return FileResponse(output_file, media_type=f"image/{format}")
-    else:
-        raise HTTPException(status_code=500, detail="Generated file not found on disk")
+@app.post("/render")
+async def trigger_render(req: RenderRequest, background_tasks: BackgroundTasks):
+    background_tasks.add_task(run_render_pipeline, req)
+    return {"status": "accepted", "message": "Job queued", "transactionId": req.transactionId}
 
-@app.get("/generate-verse-wallpaper")
-async def generate_verse_wallpaper(
-    city: str,
-    country: str,
-    verse_text: str = "",
-    verse_title: str = "",
-    theme_name: str = "noir",
-    preset: str = "mobile",
-    output_format: str = "png",
-    verse_position: str = "center",
-    clear_size: Optional[str] = None,
-    watermark: bool = True,
-    quality: int = 90,
-    dpi: int = 100,
-    distance: Optional[int] = None
-):
-    logger.info(f"Generating verse wallpaper for {city}, {country} with theme {theme_name}")
-    logger.info(f"Params: preset={preset}, format={output_format}, watermark={watermark}, quality={quality}, dpi={dpi}, distance={distance}")
-    
-    # Get coordinates
-    coords = create_verse_wallpaper.get_coordinates(city, country)
-    
-    # Get distance from theme if possible, override if distance provided
-    dist = distance
-    if dist is None:
-        temp_theme = create_map_poster.load_theme(theme_name)
-        dist = temp_theme.get('distance', 10000)
-    
-    # Generate wallpaper
-    output_path = create_verse_wallpaper.create_verse_wallpaper(
-        city=city,
-        country=country,
-        point=coords,
-        dist=dist,
-        verse_text=verse_text,
-        verse_title=verse_title,
-        theme_name=theme_name,
-        preset=preset,
-        output_format=output_format,
-        verse_position_name=verse_position,
-        clear_size=clear_size,
-        watermark=watermark,
-        quality=quality,
-        dpi=dpi
-    )
-    
-    if output_path and os.path.exists(output_path):
-        media_type = f"image/{output_format}"
-        if output_format == "avif":
-            media_type = "image/avif"
-        return FileResponse(output_path, media_type=media_type)
-    else:
-        raise HTTPException(status_code=500, detail="Generated wallpaper not found on disk")
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
