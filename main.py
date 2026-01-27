@@ -4,23 +4,22 @@ import subprocess
 import os
 import sys
 import re
+import time
+from datetime import datetime
 from supabase import create_client, Client
 
-app = FastAPI(title="CybUrban Rendering Engine (Supabase Integrated)")
+app = FastAPI(title="CybUrban Rendering Engine (Granular Diagnostics)")
 
 # Load environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    print("WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set!")
 
 # Initialize Supabase Client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY else None
 
 class RenderRequest(BaseModel):
     transactionId: str
-    renderId: str = None  # Optional but recommended for full tracking
+    renderId: str = None
     city: str
     country: str
     theme: str
@@ -30,7 +29,7 @@ class RenderRequest(BaseModel):
     distance: int
     amount: float = 0.0
 
-def supabase_callback(status: str, render_id: str = None, transaction_id: str = None, result_url: str = None, error: str = None):
+def supabase_callback(status: str, transaction_id: str, result_url: str = None, error: str = None, logs_url: str = None):
     """Notify Supabase Edge Function to handle notifications and complex logic."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
@@ -42,11 +41,11 @@ def supabase_callback(status: str, render_id: str = None, transaction_id: str = 
         "Content-Type": "application/json"
     }
     payload = {
-        "renderId": render_id,
         "transactionId": transaction_id,
         "status": status,
         "resultPath": result_url,
         "error": error,
+        "logsUrl": logs_url,
         "workerId": "railway-worker-engine"
     }
     try:
@@ -55,32 +54,35 @@ def supabase_callback(status: str, render_id: str = None, transaction_id: str = 
         print(f"Callback failed: {e}")
 
 def run_render_pipeline(req: RenderRequest):
-    """Background task to run the CLI tool and sync to Supabase."""
+    """Refined background task with granular node updates and log delivery."""
     if not supabase:
         print("✗ Supabase client not initialized. Aborting.")
         return
 
+    full_logs = []
+    def log(msg: str):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry = f"[{ts}] {msg}"
+        print(entry)
+        full_logs.append(entry)
+
     try:
-        # 1. Update status and trigger callback
+        # STEP 1: Engine Active
+        log(f"Initializing engine for transaction {req.transactionId}")
         supabase.table("cyburban_transactions").update({
-            "status": "processing",
-            "full_message": "Render engine started..."
+            "status": "engine_active",
+            "full_message": "Rendering environment provisioned. Starting engine..."
         }).eq("id", req.transactionId).execute()
+        supabase_callback("engine_active", transaction_id=req.transactionId)
 
-        # Trigger Edge Function for notifications
-        supabase_callback("processing", render_id=req.renderId, transaction_id=req.transactionId)
+        # STEP 2: Rendering
+        log(f"Starting CybUrban CLI core for {req.city}...")
+        supabase.table("cyburban_transactions").update({
+            "status": "rendering",
+            "full_message": "Vulkan Engine active: crunching map pixels and verse typography..."
+        }).eq("id", req.transactionId).execute()
+        supabase_callback("rendering", transaction_id=req.transactionId)
 
-        supabase.table("render_jobs_audit").insert({
-            "transaction_id": req.transactionId,
-            "render_id": req.renderId,
-            "event_type": "render_started",
-            "details": {"engine": "CybUrban-Python-CLI"}
-        }).execute()
-
-        # 2. Determine formats based on amount (Tiers)
-        # Standard (50): AVIF
-        # HD (200): PNG + AVIF
-        # Max (1000): PNG + AVIF
         target_formats = ["avif"]
         if req.amount >= 200:
             target_formats.append("png")
@@ -88,7 +90,6 @@ def run_render_pipeline(req: RenderRequest):
         uploaded_results = {}
         
         for fmt in target_formats:
-            # 3. Build CLI Arguments
             cmd = [
                 sys.executable, "create_verse_wallpaper.py",
                 "-c", req.city,
@@ -101,97 +102,91 @@ def run_render_pipeline(req: RenderRequest):
                 "-f", fmt
             ]
             
-            print(f"Running CLI for format {fmt}: {' '.join(cmd)}")
+            log(f"Running CLI Command: {' '.join(cmd)}")
             result = subprocess.run(cmd, capture_output=True, text=True)
             
-            if result.returncode != 0:
-                print(f"⚠ Render error for {fmt}: {result.stderr}")
-                continue # Try next format if one fails
+            if result.stdout: full_logs.append(result.stdout)
+            if result.stderr: full_logs.append(f"STDERR: {result.stderr}")
 
-            # 4. Find the output filename from stdout
-            match = re.search(r"Wallpaper saved as\s+(.*?\." + fmt + r")", result.stdout)
-            if not match:
-                # Fallback check
-                match = re.search(r"saved as (.*?posters/.*?\." + fmt + r")", result.stdout)
-                if not match:
-                    print(f"⚠ Could not find output filename for {fmt}")
-                    continue
-            
-            local_path = match.group(1).strip()
-            # Clean up potential terminal formatting or spaces
-            local_path = local_path.split('\n')[0].strip()
-            
-            if not os.path.exists(local_path):
-                print(f"⚠ File {local_path} not found on disk")
+            if result.returncode != 0:
+                log(f"⚠ Render error for {fmt}")
                 continue
 
-            # 5. Upload to Supabase Storage
-            # Use original filename to preserve metadata/format info
-            filename = os.path.basename(local_path)
+            match = re.search(r"Wallpaper saved as\s+(.*?\." + fmt + r")", result.stdout)
+            if not match:
+                match = re.search(r"saved as (.*?posters/.*?\." + fmt + r")", result.stdout)
             
-            with open(local_path, "rb") as f:
-                supabase.storage.from_("renders").upload(
-                    path=filename,
-                    file=f,
-                    file_options={"content-type": f"image/{fmt}", "x-upsert": "true"}
-                )
-
-            uploaded_url = supabase.storage.from_("renders").get_public_url(filename)
-            uploaded_results[fmt] = uploaded_url
-            print(f"✓ Uploaded {fmt}: {uploaded_url}")
+            if match:
+                local_path = match.group(1).strip().split('\n')[0].strip()
+                if os.path.exists(local_path):
+                    filename = f"{req.transactionId}_{os.path.basename(local_path)}"
+                    with open(local_path, "rb") as f:
+                        supabase.storage.from_("renders").upload(
+                            path=filename,
+                            file=f,
+                            file_options={"content-type": f"image/{fmt}", "x-upsert": "true"}
+                        )
+                    uploaded_url = supabase.storage.from_("renders").get_public_url(filename)
+                    uploaded_results[fmt] = uploaded_url
+                    log(f"✓ Uploaded {fmt}: {uploaded_url}")
 
         if not uploaded_results:
-            raise Exception("No renders were successfully generated or uploaded.")
+            raise Exception("Pixel Engine failed to produce output assets.")
 
-        # 6. Finalize DB and trigger completion callback
-        # Use PNG if available as primary, otherwise AVIF
+        # STEP 3: Generated
+        log("Assets generated and validated. Preparing delivery...")
+        supabase.table("cyburban_transactions").update({
+            "status": "generated",
+            "full_message": "Asset verification complete. Packaging for delivery..."
+        }).eq("id", req.transactionId).execute()
+        supabase_callback("generated", transaction_id=req.transactionId)
+
+        # STEP 4: Delivered (Finalize)
         primary_url = uploaded_results.get("png", uploaded_results.get("avif"))
-        
         supabase.table("cyburban_transactions").update({
             "status": "completed",
-            "full_message": f"Render Delivered: {', '.join(uploaded_results.keys()).upper()}",
+            "full_message": "Render successfully delivered to your device.",
             "render_url": primary_url
         }).eq("id", req.transactionId).execute()
 
-        supabase_callback("completed", render_id=req.renderId, transaction_id=req.transactionId, result_url=primary_url)
+        supabase_callback("completed", transaction_id=req.transactionId, result_url=primary_url)
+        log(f"✓ Automation complete for {req.transactionId}")
 
-        supabase.table("render_jobs_audit").insert({
-            "transaction_id": req.transactionId,
-            "render_id": req.renderId,
-            "event_type": "render_completed",
-            "details": {"urls": uploaded_results}
-        }).execute()
-
-        # 7. Cleanup local files
-        for local_file in [f for f in os.listdir("posters") if req.transactionId in f or any(res in f for res in uploaded_results.keys())]:
+        # Cleanup
+        for local_file in [f for f in os.listdir("posters") if req.transactionId in f]:
             try:
-                path = os.path.join("posters", local_file)
-                if os.path.isfile(path):
-                    os.remove(path)
-                    print(f"Cleaned up local file: {path}")
-            except Exception as e:
-                print(f"Error cleaning up {local_file}: {e}")
-
-        print(f"✓ Automation complete for {req.transactionId}")
+                os.remove(os.path.join("posters", local_file))
+            except: pass
 
     except Exception as e:
         error_msg = str(e)
-        print(f"✗ Automation failed: {error_msg}")
+        log(f"✗ CRITICAL FAILURE: {error_msg}")
+        
+        # 📂 DIAGNOSTIC LOG DELIVERY
+        logs_text = "\n".join(full_logs)
+        log_filename = f"error_{req.transactionId}.log"
+        logs_url = None
+        
         try:
-            # Using Supabase client for error status
+            # Upload logs to 'logs' bucket
+            supabase.storage.from_("logs").upload(
+                path=log_filename,
+                file=logs_text.encode('utf-8'),
+                file_options={"content-type": "text/plain", "x-upsert": "true"}
+            )
+            logs_url = supabase.storage.from_("logs").get_public_url(log_filename)
+        except Exception as log_err:
+            print(f"Failed to upload troubleshooting logs: {log_err}")
+
+        try:
+            # Update fail status with logs
             supabase.table("cyburban_transactions").update({
                 "status": "failed",
-                "full_message": f"Error: {error_msg}"
+                "full_message": f"Critical Error: {error_msg}",
+                "logs_url": logs_url
             }).eq("id", req.transactionId).execute()
 
-            supabase_callback("failed", render_id=req.renderId, transaction_id=req.transactionId, error=error_msg)
-
-            supabase.table("render_jobs_audit").insert({
-                "transaction_id": req.transactionId,
-                "render_id": req.renderId,
-                "event_type": "render_failed",
-                "details": {"error": error_msg}
-            }).execute()
+            supabase_callback("failed", transaction_id=req.transactionId, error=error_msg, logs_url=logs_url)
         except Exception as inner:
             print(f"Error updating fail status: {inner}")
 
