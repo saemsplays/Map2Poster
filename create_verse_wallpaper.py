@@ -50,10 +50,12 @@ PRESETS = {
     'mobile_hd': (1440, 2560),
     'desktop': (1920, 1080),
     'desktop_hd': (2560, 1440),
+    'tablet': (2048, 2732), # iPad Pro standard
     'stories': (1080, 1920),
     # High-DPI / High-Quality Presets
     'mobile_max': (1800, 2400),
     'desktop_max': (2400, 3200),
+    'tablet_hd': (2732, 2048),
     'ultra_hd': (3600, 4800),
 }
 
@@ -593,10 +595,15 @@ def create_verse_wallpaper(
     
     clear_config = CLEARING_CONFIG[clear_size]
     
+    # Determine if we allow special positioning (Landscape or Tablet aspect ratios)
+    aspect_ratio = W_px / H_px
+    allow_positioning = aspect_ratio > 0.7 # Tablets are ~0.75, Mobile is ~0.56
+    
     # Get verse position
-    if is_landscape and verse_position_name in VERSE_POSITIONS:
+    if allow_positioning and verse_position_name in VERSE_POSITIONS:
         verse_position = VERSE_POSITIONS[verse_position_name]
     else:
+        # Narrow mobile or unknown position: Force center
         verse_position = VERSE_POSITIONS['center']
     
     # Shift map center for better composition
