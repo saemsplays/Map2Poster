@@ -66,6 +66,19 @@ def run_render_pipeline(req: RenderRequest):
         print(entry)
         full_logs.append(entry)
 
+    # Telemetry Header
+    log("--- SYSTEM TELEMETRY ---")
+    log(f"OS: {sys.platform}")
+    log(f"Python: {sys.version}")
+    log(f"CWD: {os.getcwd()}")
+    try:
+        import multiprocessing
+        log(f"Cores: {multiprocessing.cpu_count()}")
+    except: pass
+    log("-------------------------")
+
+    last_cli_error = None
+
     try:
         # STEP 1: Engine Active
         log(f"Initializing engine for transaction {req.transactionId}")
@@ -106,10 +119,15 @@ def run_render_pipeline(req: RenderRequest):
             result = subprocess.run(cmd, capture_output=True, text=True)
             
             if result.stdout: full_logs.append(result.stdout)
-            if result.stderr: full_logs.append(f"STDERR: {result.stderr}")
+            if result.stderr: 
+                full_logs.append(f"STDERR: {result.stderr}")
+                if "Error:" in result.stderr:
+                    last_cli_error = result.stderr.strip().split('\n')[-1]
 
             if result.returncode != 0:
                 log(f"⚠ Render error for {fmt}")
+                if "Error:" in result.stderr:
+                    last_cli_error = result.stderr.strip().split('\n')[-1]
                 continue
 
             match = re.search(r"Wallpaper saved as\s+(.*?\." + fmt + r")", result.stdout)
@@ -159,7 +177,7 @@ def run_render_pipeline(req: RenderRequest):
             except: pass
 
     except Exception as e:
-        error_msg = str(e)
+        error_msg = last_cli_error if last_cli_error else str(e)
         log(f"✗ CRITICAL FAILURE: {error_msg}")
         
         # 📂 DIAGNOSTIC LOG DELIVERY
